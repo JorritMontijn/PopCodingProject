@@ -1,34 +1,12 @@
 %% aim
 %{
-"distinct subnetworks in mouse visual system for visual and non-visual signals"
-
-At single trial basis, split which info information limiting noise
-(projected unto f') and non-limiting noise (orthogonal directions). Then
-look at correlation of those noise types between areas. E.g., lgn diff
-corrs correlate with v1, but SC non-diff corrs correlate with v1
-
-
-Introduce with: spike count correlations are generally low, but important.
-Show how to decompose noise correlations on single trials and that
-orth>para. Show that inter-areal correlations of shuffles are 0, then show
-real data: all red. Trial-to -trial variability in MD coding is highly
-correlated despite pairwise noise correlations being low
 
 %}
 %% define qualifying areas
+clear all;
 cellUseAreas = {...
-	'Subiculum',...
-	'Posterior complex of the thalamus',...
-	'Anterior pretectal nucleus',...
-	'Superior colliculus',...
-	'Lateral posterior nucleus of the thalamus',...
-	'Nucleus of the optic tract',...
-	'Dorsal part of the lateral geniculate complex',...
 	'Primary visual area',...
 	'posteromedial visual area',...
-	'Anteromedial visual area',...
-	'Retrosplenial area',...
-	'Anterior area',...
 	};
 
 
@@ -36,6 +14,7 @@ cellUseAreas = {...
 if ~exist('sAggStim','var') || isempty(sAggStim)
 	[sAggStim,sAggNeuron]=loadDataNpx('','driftinggrating');
 end
+sAggNeuron(strcmpi({sAggNeuron.SubjectType},'DBA')) = [];
 
 %% pre-allocate matrices
 intAreas = numel(cellUseAreas);
@@ -48,18 +27,18 @@ matDecPerf = [];
 
 %% go through recordings
 tic
-for intRec=10:numel(sAggStim)
+for intRec=1:numel(sAggStim)
 	% get matching recording data
-	strRec = sAggStim(intRec).Rec;
-	sThisRec = sAggStim(strcmpi(strRec,{sAggStim(:).Rec}));
+	strRec = sAggStim(intRec).Exp;
+	sThisRec = sAggStim(strcmpi(strRec,{sAggStim(:).Exp}));
 	
 	%remove stimulus sets that are not 24 stim types
-	sThisRec.cellStim(cellfun(@(x) x.structEP.intStimTypes,sThisRec.cellStim) ~= 24) = [];
+	sThisRec.cellBlock(cellfun(@(x) x.intTrialNum/x.intNumRepeats,sThisRec.cellBlock) ~= 24) = [];
 	% concatenate stimulus structures
-	structStim = catstim(sThisRec.cellStim);
+	structStim = catstim(sThisRec.cellBlock);
 	vecStimOnTime = structStim.vecStimOnTime;
 	vecStimOffTime = structStim.vecStimOffTime;
-	vecOrientation = structStim.Orientation;
+	vecOrientation = cell2vec({structStim.sStimObject(structStim.vecTrialStimTypes).Orientation})';
 	[vecOriIdx,vecUniqueOris,vecRepNum,cellSelect,vecTrialRepetition]  = label2idx(vecOrientation);
 	indRem=vecTrialRepetition>min(vecRepNum);
 	vecOrientation(indRem) = [];
@@ -71,7 +50,7 @@ for intRec=10:numel(sAggStim)
 	intRepNum = intTrialNum/intOriNum;
 	
 	%remove neurons from other recs
-	indQualifyingNeurons = contains({sAggNeuron.Rec},strRec);
+	indQualifyingNeurons = contains({sAggNeuron.Exp},strRec);
 	
 	%remove neurons in incorrect areas
 	indConsiderNeurons = contains({sAggNeuron.Area},cellUseAreas,'IgnoreCase',true);
@@ -94,11 +73,13 @@ for intRec=10:numel(sAggStim)
 		%% get spike times
 		cellSpikeTimes = {sArea1Neurons.SpikeTimes};
 		intNumN = numel(cellSpikeTimes);
-		dblStimDur = roundi(min(vecStimOffTime - vecStimOnTime),1,'ceil');
+		dblStimDur = roundi(median(vecStimOffTime - vecStimOnTime),1,'ceil');
 		dblPreTime = 0.5;
 		dblPostTime = 0.5;
 		dblMaxDur = dblStimDur+dblPreTime+dblPostTime;
-		vecBinEdges = 0:0.1:dblMaxDur;
+		dblBinWidth = 0.1;
+		vecBinEdges = 0:dblBinWidth:dblMaxDur;
+		vecStimTime = vecBinEdges(2:end)-dblBinWidth/2 - dblPreTime;
 		intBinNum = numel(vecBinEdges)-1;
 		matBNSR = nan(intBinNum,intNumN,intOriNum,intRepNum);
 		matBNT = nan(intBinNum,intNumN,intTrialNum);
@@ -128,22 +109,41 @@ for intRec=10:numel(sAggStim)
 		intOriNum180 = intOriNum/2;
 		matDecConfusion = nan(intOriNum180,intOriNum180,intBinNum);
 		vecSpikesPerBin = sum(sum(matBNT,2),3)';
+		[varDataOut,vecUnique,vecPriorDistribution,cellSelect,vecRepetition] = label2idx(vecOri180);
 		for intBinIdx=1:intBinNum
 			intBinIdx
-			[dblPerformance,vecDecodedIndexCV,matPosteriorProbability,matWeights,dblMeanErrorDegs,matConfusion] = ...
-				doCrossValidatedDecodingLR(squeeze(matBNT(intBinIdx,:,:)),vecOri180,intTypeCV,dblLambda);
+			[dblPerformanceCV,vecDecodedIndexCV,matPosteriorProbability,dblMeanErrorDegs,matConfusion,matWeights] = ...
+				doCrossValidatedDecodingLR(squeeze(matBNT(intBinIdx,:,:)),vecOri180,intTypeCV,vecPriorDistribution,dblLambda);
 			vecDecErr(intBinIdx) = dblMeanErrorDegs;
-			matDecPerf(intBinIdx,end) = dblPerformance;
+			matDecPerf(intBinIdx,end) = dblPerformanceCV;
 			matDecConfusion(:,:,intBinIdx) = matConfusion;
 		end
 		%%
-		figure
-		plot(zscore(matDecPerf(:,end)./vecSpikesPerBin))
+		dblChance = 1/numel(vecPriorDistribution);
+		figure;maxfig;
+		subplot(2,3,1)
+		plot(vecStimTime,matDecPerf(:,end)');
 		hold on
-		plot(zscore(vecSpikesPerBin))
+		plot([vecStimTime(1) vecStimTime(end)],[dblChance dblChance],'--','color',[0.5 0.5 0.5]);
 		hold off
-		title(sprintf('%s',strArea))
-		%pause
+		title(sprintf('Dec perf; %s',strArea))
+		xlabel('Time after onset (s)');
+		ylabel('Fraction correct decoded');
+		fixfig;
+		
+		subplot(2,3,2)
+		plot(vecStimTime,vecSpikesPerBin)
+		title('Spikes per bin')
+		xlabel('Time after onset (s)');
+		ylabel('Spikes per bin');
+		fixfig;
+		
+		subplot(2,3,3)
+		plot(vecStimTime,(matDecPerf(:,end)-dblChance)'./vecSpikesPerBin)
+		title('Dec perf / spike')
+		xlabel('Time after onset (s)');
+		ylabel('Performance/spike');
+		fixfig;
 	end
 end
 toc
